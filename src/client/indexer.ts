@@ -2,6 +2,8 @@ import type { IndexEntry } from './types';
 import { getCapturedAuth } from './auth-capture';
 
 const TAG = '[ssb:indexer]';
+const RETRY_INTERVAL_MS = 2000;
+const MAX_RETRIES = 30; // 2s × 30 = 60s max wait
 
 export type IndexState = {
   entries: IndexEntry[];
@@ -41,9 +43,9 @@ export async function buildIndex(
     });
 
     if (resp.status === 429) {
-      console.warn(`${TAG} crawl already in progress`);
-      onProgress?.('Crawl in progress, try again later');
-      return [];
+      console.debug(`${TAG} crawl in progress, waiting...`);
+      onProgress?.('Crawl in progress, waiting...');
+      return waitForCrawl(headers, onProgress);
     }
 
     if (!resp.ok) {
@@ -68,4 +70,41 @@ export async function buildIndex(
     onProgress?.('Network error');
     return [];
   }
+}
+
+/** Poll until the in-progress crawl finishes, then return the result. */
+async function waitForCrawl(
+  headers: Record<string, string>,
+  onProgress?: (msg: string) => void,
+): Promise<IndexEntry[]> {
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    await new Promise((r) => setTimeout(r, RETRY_INTERVAL_MS));
+    onProgress?.(`Waiting for crawl... (${i + 1})`);
+
+    try {
+      const resp = await fetch('/setting-searchbar/build-index', {
+        method: 'POST',
+        headers,
+      });
+
+      if (resp.status === 429) continue;
+
+      if (!resp.ok) {
+        console.error(`${TAG} server returned ${resp.status}`);
+        onProgress?.('Crawl failed');
+        return [];
+      }
+
+      const result: { entries: IndexEntry[]; requestLog: { method: string; url: string; action: string }[] } = await resp.json();
+      console.debug(`${TAG} received ${result.entries.length} entries after waiting`);
+      onProgress?.(`${result.entries.length} items indexed`);
+      return result.entries;
+    } catch (err) {
+      console.error(`${TAG} fetch error while waiting:`, err);
+    }
+  }
+
+  console.warn(`${TAG} gave up waiting after ${MAX_RETRIES} retries`);
+  onProgress?.('Crawl timed out');
+  return [];
 }

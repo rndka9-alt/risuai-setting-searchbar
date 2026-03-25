@@ -18,13 +18,15 @@ export function injectStyles() {
   stylesInjected = true;
   const style = document.createElement('style');
   style.textContent = `
-    /* Reserve space in sidebar so the search bar doesn't cause layout shift */
+    /* Reserve space in sidebar so the search bar doesn't cause layout shift.
+       Height = margin-top(8) + border(2) + padding(12) + font(1rem)
+              + padding-bottom(8) + border-bottom(1) + margin-bottom(4) */
     .rs-setting-cont-3 {
-      padding-top: 48px;
+      padding-top: calc(1rem + 35px);
     }
 
     .ssb-root {
-      margin-top: -48px;
+      margin-top: calc(-1rem - 35px);
       padding: 0 0 8px;
       /* width: 0 makes this element contribute 0 to the parent's intrinsic
          width calculation. min-width: 100% then stretches it to fill whatever
@@ -331,6 +333,8 @@ async function triggerIndex(force = false) {
         if (statusEl) statusEl.style.display = 'none';
       }, 1200);
     }
+    // Re-run search if user already typed a query while indexing
+    if (activeQuery) applySearch(activeQuery);
   } catch (err) {
     console.error('[ssb:ui] index error:', err);
     if (statusEl) {
@@ -407,7 +411,7 @@ export function createSearchUI(): HTMLElement {
   input.placeholder = 'Search settings...';
   input.style.cssText = `
     flex: 1; border: none; outline: none;
-    background: transparent; font-size: 13px;
+    background: transparent; font-size: 1rem;
     color: var(--risu-theme-textcolor); min-width: 0;
   `;
 
