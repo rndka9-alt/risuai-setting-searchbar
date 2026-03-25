@@ -1,31 +1,44 @@
 import type { IndexEntry } from './types';
 
 const NAV_WAIT_MS = 150;
-const CONTENT_APPEAR_POLL_MS = 50;
-const CONTENT_APPEAR_TIMEOUT_MS = 2000;
+const POLL_INTERVAL_MS = 50;
+const CONTENT_TIMEOUT_MS = 2000;
+const ACCORDION_TIMEOUT_MS = 1500;
+
+/** Monotonically increasing navigation ID for debouncing. */
+let currentNavId = 0;
 
 function wait(ms: number): Promise<void> {
   return new Promise((r) => requestAnimationFrame(() => setTimeout(r, ms)));
 }
 
-/** Wait for `.rs-setting-cont-4` to appear in the DOM (for mobile navigation). */
-function waitForContent(): Promise<Element | null> {
-  const existing = document.querySelector('.rs-setting-cont-4');
-  if (existing) return Promise.resolve(existing);
+/** Poll until `predicate` returns true, or timeout. */
+function pollUntil(
+  predicate: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (predicate()) return Promise.resolve(true);
 
   return new Promise((resolve) => {
     const start = Date.now();
     const id = setInterval(() => {
-      const el = document.querySelector('.rs-setting-cont-4');
-      if (el) {
+      if (predicate()) {
         clearInterval(id);
-        resolve(el);
-      } else if (Date.now() - start > CONTENT_APPEAR_TIMEOUT_MS) {
+        resolve(true);
+      } else if (Date.now() - start > timeoutMs) {
         clearInterval(id);
-        resolve(null);
+        resolve(false);
       }
-    }, CONTENT_APPEAR_POLL_MS);
+    }, POLL_INTERVAL_MS);
   });
+}
+
+/** Wait for `.rs-setting-cont-4` to appear in the DOM (for mobile navigation). */
+function waitForContent(): Promise<Element | null> {
+  return pollUntil(
+    () => !!document.querySelector('.rs-setting-cont-4'),
+    CONTENT_TIMEOUT_MS,
+  ).then((found) => found ? document.querySelector('.rs-setting-cont-4') : null);
 }
 
 function getMenuButtons(sidebar: Element): HTMLButtonElement[] {
@@ -42,14 +55,6 @@ function getSubmenuButtons(content: Element): HTMLButtonElement[] {
   );
   if (!container) return [];
   return [...container.querySelectorAll<HTMLButtonElement>('button')];
-}
-
-function getPageRoot(contentWrapper: Element): Element {
-  return (
-    contentWrapper.firstElementChild?.firstElementChild ||
-    contentWrapper.firstElementChild ||
-    contentWrapper
-  );
 }
 
 // ─── Highlighting ───
@@ -79,7 +84,7 @@ export function highlightExact(displayText: string): void {
       el.addEventListener('animationend', () => {
         el.classList.remove(HIGHLIGHT_CLASS);
       }, { once: true });
-      break; // Pin-point: only the first exact match
+      break;
     }
   }
 }
@@ -105,10 +110,16 @@ export function scrollToFirstHighlight(): void {
  * Navigate to a specific setting:
  * 1. Click the sidebar button
  * 2. Click the submenu tab (if applicable)
- * 3. Highlight matching text
- * 4. Scroll to first match
+ * 3. Open accordions in the path
+ * 4. Highlight matching text
+ * 5. Scroll to first match
+ *
+ * Uses a navId to debounce: if a newer navigateTo is called while
+ * this one is awaiting, this one bails out early.
  */
 export async function navigateTo(entry: IndexEntry): Promise<void> {
+  const navId = ++currentNavId;
+
   const sidebar = document.querySelector('.rs-setting-cont-3');
   if (!sidebar) return;
 
@@ -118,28 +129,69 @@ export async function navigateTo(entry: IndexEntry): Promise<void> {
 
   clearHighlights();
 
-  // Click the sidebar button first. On mobile (<700px), this sets
-  // SettingsMenuIndex which hides the sidebar and renders the content area.
   btn.click();
   await wait(NAV_WAIT_MS);
+  if (navId !== currentNavId) return;
 
-  // Wait for content area — on mobile it appears after Svelte re-renders.
   const contentWrapper = await waitForContent();
-  if (!contentWrapper) return;
-
-  const pageRoot = getPageRoot(contentWrapper);
+  if (!contentWrapper || navId !== currentNavId) return;
 
   if (entry.subIdx >= 0) {
-    const subButtons = getSubmenuButtons(pageRoot);
+    const subButtons = getSubmenuButtons(contentWrapper);
     const subBtn = subButtons[entry.subIdx];
     if (subBtn) {
       subBtn.click();
       await wait(NAV_WAIT_MS);
+      if (navId !== currentNavId) return;
     }
   }
 
-  // Extra wait for Svelte to finish rendering tab content
+  // Open accordions in the path (outer to inner)
+  for (const accordionName of entry.accordionPath) {
+    if (navId !== currentNavId) return;
+
+    const contentArea = document.querySelector('.rs-setting-cont-4');
+    if (!contentArea) return;
+
+    const buttons = contentArea.querySelectorAll<HTMLButtonElement>('button');
+    let found = false;
+    for (const accBtn of buttons) {
+      const cls = accBtn.className;
+      if (!cls.includes('hover:bg-selected') || !cls.includes('text-lg')) continue;
+      if (accBtn.textContent?.trim() !== accordionName) continue;
+
+      found = true;
+      // Check if already open: an open accordion has a sibling content div
+      // rendered by Svelte's {#if open}. If nextElementSibling is a non-button
+      // div, the accordion is already open.
+      const next = accBtn.nextElementSibling;
+      if (next && next.tagName !== 'BUTTON') break; // already open
+
+      accBtn.click();
+      // Wait until the content div appears as the next sibling
+      const opened = await pollUntil(
+        () => {
+          const sib = accBtn.nextElementSibling;
+          return !!sib && sib.tagName !== 'BUTTON';
+        },
+        ACCORDION_TIMEOUT_MS,
+      );
+      if (!opened) {
+        console.warn(`[ssb:nav] accordion "${accordionName}" did not open`);
+      }
+      break;
+    }
+    if (!found) {
+      console.warn(`[ssb:nav] accordion "${accordionName}" not found`);
+    }
+  }
+
+  if (navId !== currentNavId) return;
+
+  // Extra wait for Svelte to finish rendering
   await wait(NAV_WAIT_MS);
+  if (navId !== currentNavId) return;
+
   highlightExact(entry.displayText);
   scrollToFirstHighlight();
 }

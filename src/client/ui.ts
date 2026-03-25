@@ -210,10 +210,11 @@ function renderResults(groups: MenuGroup[]) {
       name.textContent = entry.displayText;
       item.appendChild(name);
 
-      if (entry.subLabel) {
+      const pathLabel = [entry.subLabel, ...entry.accordionPath].filter(Boolean).join(' › ');
+      if (pathLabel) {
         const sub = document.createElement('span');
         sub.className = 'ssb-item-sub';
-        sub.textContent = entry.subLabel;
+        sub.textContent = pathLabel;
         item.appendChild(sub);
       }
 
@@ -238,10 +239,11 @@ function renderResults(groups: MenuGroup[]) {
         name.textContent = entry.displayText;
         item.appendChild(name);
 
-        if (entry.subLabel) {
+        const pathLabel = [entry.subLabel, ...entry.accordionPath].filter(Boolean).join(' › ');
+        if (pathLabel) {
           const sub = document.createElement('span');
           sub.className = 'ssb-item-sub';
-          sub.textContent = entry.subLabel;
+          sub.textContent = pathLabel;
           item.appendChild(sub);
         }
 

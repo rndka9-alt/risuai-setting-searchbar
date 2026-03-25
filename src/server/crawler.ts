@@ -16,6 +16,7 @@ interface IndexEntry {
   menuLabel: string;
   subIdx: number;
   subLabel: string;
+  accordionPath: string[];
 }
 
 // ─── Browser pool (reuse across crawls) ───
@@ -236,15 +237,33 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
       }
     }
 
-    function collectLabels(root: Element): { display: string; search: string }[] {
-      const results: { display: string; search: string }[] = [];
+    /** Walk up from an element to find parent accordion button names. */
+    function getAccordionPath(el: Element, contentRoot: Element): string[] {
+      const path: string[] = [];
+      let current = el.parentElement;
+      while (current && current !== contentRoot) {
+        const prev = current.previousElementSibling;
+        if (prev && prev.tagName === 'BUTTON') {
+          const cls = prev.className;
+          if (cls.includes('hover:bg-selected') && cls.includes('text-lg')) {
+            const name = prev.textContent?.trim() || '';
+            if (name) path.unshift(name);
+          }
+        }
+        current = current.parentElement;
+      }
+      return path;
+    }
+
+    function collectLabels(root: Element): { display: string; search: string; accordionPath: string[] }[] {
+      const results: { display: string; search: string; accordionPath: string[] }[] = [];
       const seen = new Set<string>();
 
       root.querySelectorAll('h2, h3').forEach((h) => {
         const text = h.textContent?.trim();
         if (text && text.length >= 2 && !seen.has(text)) {
           seen.add(text);
-          results.push({ display: text, search: text });
+          results.push({ display: text, search: text, accordionPath: getAccordionPath(h, root) });
         }
       });
 
@@ -259,7 +278,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
           seen.add(display);
           const parent = el.parentElement;
           const search = parent?.textContent?.trim() || display;
-          results.push({ display, search });
+          results.push({ display, search, accordionPath: getAccordionPath(el, root) });
         });
 
       return results;
@@ -317,6 +336,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
               menuLabel,
               subIdx: si,
               subLabel,
+              accordionPath: l.accordionPath,
             });
           }
         }
@@ -332,6 +352,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
             menuLabel,
             subIdx: -1,
             subLabel: '',
+            accordionPath: l.accordionPath,
           });
         }
       }

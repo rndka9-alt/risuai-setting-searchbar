@@ -11,4 +11,6 @@ export interface IndexEntry {
   subIdx: number;
   /** Submenu tab label (e.g., "Parameters") */
   subLabel: string;
+  /** Accordion names from outer to inner (e.g., ["Prompt Template"]) */
+  accordionPath: string[];
 }
