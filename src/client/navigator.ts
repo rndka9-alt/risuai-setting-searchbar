@@ -56,7 +56,7 @@ function getPageRoot(contentWrapper: Element): Element {
 
 const HIGHLIGHT_CLASS = 'ssb-highlight';
 
-/** Add persistent highlights to elements matching the query in the content area */
+/** Highlight elements matching the query with a pulse animation that auto-clears. */
 export function highlightMatches(query: string): void {
   const contentWrapper = document.querySelector('.rs-setting-cont-4');
   if (!contentWrapper) return;
@@ -78,6 +78,10 @@ export function highlightMatches(query: string): void {
     const text = el.textContent?.toLowerCase() || '';
     if (tokens.some((t) => text.includes(t))) {
       el.classList.add(HIGHLIGHT_CLASS);
+      // Remove class after animation ends so it can re-trigger on next click
+      el.addEventListener('animationend', () => {
+        el.classList.remove(HIGHLIGHT_CLASS);
+      }, { once: true });
     }
   }
 }

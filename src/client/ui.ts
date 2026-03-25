@@ -24,10 +24,16 @@ function injectStyles() {
     }
 
     .ssb-highlight {
-      background-color: var(--risu-theme-selected) !important;
       border-radius: 4px;
       outline: 1px solid var(--risu-theme-borderc);
       outline-offset: 2px;
+      animation: ssb-pulse 1.8s ease-out forwards;
+    }
+
+    @keyframes ssb-pulse {
+      0%   { background-color: var(--risu-theme-borderc); }
+      30%  { background-color: var(--risu-theme-selected); }
+      100% { background-color: transparent; outline-color: transparent; }
     }
 
     .ssb-results {
@@ -293,14 +299,20 @@ function applySearch(query: string) {
   console.log(`[ssb:ui] applySearch: ${results.length} results, ${groups.length} groups`);
   renderResults(groups);
 
-  // Auto-navigate to first result
+  // Auto-navigate to first result (desktop only).
+  // On mobile (<700px), sidebar and content are mutually exclusive —
+  // auto-navigating would immediately hide the search bar.
   if (navigateTimer) clearTimeout(navigateTimer);
-  navigateTimer = setTimeout(() => {
-    if (flatItems.length > 0) {
-      updateSelection(0);
-      navigateAndHighlight(flatItems[0].entry);
-    }
-  }, 300);
+  if (window.innerWidth >= 700) {
+    navigateTimer = setTimeout(() => {
+      if (flatItems.length > 0) {
+        updateSelection(0);
+        navigateAndHighlight(flatItems[0].entry);
+      }
+    }, 300);
+  } else if (flatItems.length > 0) {
+    updateSelection(0);
+  }
 }
 
 // ─── DOM ───
