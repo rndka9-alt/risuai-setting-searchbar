@@ -89,8 +89,13 @@ const server = http.createServer((req, res) => {
     crawlInProgress = true;
     crawlSettingsIndex(CRAWLER_TARGET, risuAuth)
       .then((result) => {
-        cachedResult = result;
-        cachedAt = Date.now();
+        // Don't overwrite good cache with empty results (auth failure etc.)
+        if (result.entries.length > 0) {
+          cachedResult = result;
+          cachedAt = Date.now();
+        } else {
+          log('info', 'crawl returned 0 entries, keeping previous cache');
+        }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(result));
       })

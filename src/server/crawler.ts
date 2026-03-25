@@ -365,8 +365,49 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
 
     const entries: IndexEntry[] = [];
 
-    /** Get a fingerprint of the content area to detect changes. */
-    function contentFingerprint(): string {
+    // ─── MutationObserver for detecting external content ───
+
+    /** Tracks nodes added outside the settings container tree. */
+    let externalAddedNodes: Node[] = [];
+    let lastMutationAt = 0;
+
+    const observer = new MutationObserver((mutations) => {
+      lastMutationAt = Date.now();
+      for (const m of mutations) {
+        for (let i = 0; i < m.addedNodes.length; i++) {
+          const node = m.addedNodes[i];
+          if (!(node instanceof HTMLElement)) continue;
+          // Skip nodes inside cont-3 (sidebar) and cont-4 (handled by existing logic)
+          if (node.closest?.('.rs-setting-cont-3')) continue;
+          if (node.closest?.('.rs-setting-cont-4')) continue;
+          // Skip our own search bar elements
+          if (node.closest?.('.ssb-root')) continue;
+          externalAddedNodes.push(node);
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    function clearMutationBuffer(): void {
+      externalAddedNodes = [];
+      lastMutationAt = 0;
+    }
+
+    /**
+     * Wait until DOM stabilizes (no mutations for `stableMs`).
+     * Works for both tab switches and lazy/waterfall rendering.
+     */
+    async function waitForStableDOM(stableMs = 400, timeoutMs = 3000): Promise<void> {
+      lastMutationAt = Date.now(); // reset on start
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        await wait(100);
+        if (Date.now() - lastMutationAt >= stableMs) return;
+      }
+    }
+
+    /** Quick fingerprint of cont-4 to detect stale content. */
+    function cont4Fingerprint(): string {
       const cw = document.querySelector('.rs-setting-cont-4');
       if (!cw) return '';
       const h2 = cw.querySelector('h2')?.textContent?.trim() || '';
@@ -374,35 +415,16 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
       return `${h2}|${elCount}`;
     }
 
-    /**
-     * Wait until content stabilizes (fingerprint unchanged for `stableMs`).
-     * Handles both tab switches (fingerprint must change from `prev`)
-     * and lazy/waterfall rendering (fingerprint must stop changing).
-     */
-    async function waitForStableContent(prevFingerprint: string, stableMs = 400, timeoutMs = 3000): Promise<void> {
-      const start = Date.now();
-      let lastFp = prevFingerprint;
-      let stableSince = 0;
-
-      while (Date.now() - start < timeoutMs) {
-        await wait(100);
-        const fp = contentFingerprint();
-        if (fp !== lastFp) {
-          lastFp = fp;
-          stableSince = Date.now();
-        } else if (stableSince > 0 && Date.now() - stableSince >= stableMs) {
-          return; // Content stabilized
-        }
-      }
-    }
+    let prevCont4Fp = '';
 
     for (let mi = 0; mi < menuButtons.length; mi++) {
       const btn = menuButtons[mi];
       const menuLabel = btn.querySelector('span')?.textContent?.trim() || '';
 
-      const prevFp = contentFingerprint();
+      const fpBefore = cont4Fingerprint();
+      clearMutationBuffer();
       btn.click();
-      await waitForStableContent(prevFp);
+      await waitForStableDOM();
 
       // Check if settings is still alive
       if (!document.querySelector('.rs-setting-cont-3')) break;
@@ -410,7 +432,17 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
       contentWrapper = document.querySelector('.rs-setting-cont-4');
       if (!contentWrapper) continue;
 
-      const subButtons = getSubmenuButtons(contentWrapper);
+      const fpAfter = cont4Fingerprint();
+      // If cont-4 didn't change, the tab renders elsewhere (plugin iframe etc.)
+      // Skip cont-4 collection to avoid attributing stale content to this tab.
+      const cont4Changed = fpAfter !== fpBefore && fpAfter !== prevCont4Fp;
+      prevCont4Fp = fpAfter;
+
+      if (!cont4Changed) {
+        console.log(`[ssb:crawl]   [${mi}] "${menuLabel}" — cont-4 unchanged, skipping (plugin/external)`);
+      }
+
+      const subButtons = cont4Changed ? getSubmenuButtons(contentWrapper) : [];
       let tabEntryCount = 0;
 
       if (subButtons.length > 0) {
@@ -419,7 +451,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
 
         for (let si = 0; si < subButtons.length; si++) {
           subButtons[si].click();
-          await wait(renderWait);
+          await waitForStableDOM(300, 2000);
 
           contentWrapper = document.querySelector('.rs-setting-cont-4');
           if (!contentWrapper) break;
@@ -443,7 +475,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
           tabEntryCount += labels.length;
           console.log(`[ssb:crawl]     [${mi}.${si}] "${subLabel}" → ${labels.length} entries`);
         }
-      } else {
+      } else if (cont4Changed) {
         console.log(`[ssb:crawl]   [${mi}] "${menuLabel}" — no subtabs`);
 
         // Expand all accordions so their content is in the DOM
@@ -463,15 +495,35 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
         }
         tabEntryCount = labels.length;
         console.log(`[ssb:crawl]     → ${labels.length} entries`);
+      }
 
-        // Dump DOM snapshot for tabs with few entries (diagnostic)
-        if (labels.length <= 1) {
-          const snapshot = contentWrapper.innerHTML.slice(0, 2000);
-          console.log(`[ssb:crawl]     DOM snapshot (${menuLabel}): ${snapshot}`);
+      // Collect labels from nodes added OUTSIDE the settings container.
+      // These are plugin modals, side panels, or other external containers.
+      if (externalAddedNodes.length > 0) {
+        let extCount = 0;
+        for (const node of externalAddedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          const extLabels = collectLabels(node);
+          for (const l of extLabels) {
+            entries.push({
+              displayText: l.display,
+              searchText: l.search,
+              menuButtonIdx: mi,
+              menuLabel,
+              subIdx: -1,
+              subLabel: '',
+              accordionPath: l.accordionPath,
+            });
+          }
+          extCount += extLabels.length;
+        }
+        if (extCount > 0) {
+          console.log(`[ssb:crawl]     + ${extCount} entries from external nodes`);
         }
       }
     }
 
+    observer.disconnect();
     return entries;
   }, RENDER_WAIT_MS);
 }

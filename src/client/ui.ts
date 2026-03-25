@@ -309,13 +309,18 @@ async function triggerIndex(force = false) {
     index = await buildIndex((msg) => {
       if (statusEl) statusEl.textContent = msg;
     }, force);
-    isIndexed = true;
+    isIndexed = index.length > 0;
     console.debug(`[ssb:ui] index built: ${index.length} entries`);
     if (statusEl) {
-      statusEl.textContent = `${index.length} items indexed`;
-      setTimeout(() => {
-        if (statusEl) statusEl.style.display = 'none';
-      }, 1200);
+      if (index.length === 0) {
+        statusEl.textContent = 'Crawl failed — try refreshing the page';
+        statusEl.style.display = 'block';
+      } else {
+        statusEl.textContent = `${index.length} items indexed`;
+        setTimeout(() => {
+          if (statusEl) statusEl.style.display = 'none';
+        }, 1200);
+      }
     }
     // Re-run search if user already typed a query while indexing
     if (activeQuery) applySearch(activeQuery);
