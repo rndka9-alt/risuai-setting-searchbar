@@ -56,32 +56,30 @@ function getPageRoot(contentWrapper: Element): Element {
 
 const HIGHLIGHT_CLASS = 'ssb-highlight';
 
-/** Highlight elements matching the query with a pulse animation that auto-clears. */
-export function highlightMatches(query: string): void {
+/** Highlight the exact element matching `displayText` with a pulse animation. */
+export function highlightExact(displayText: string): void {
   const contentWrapper = document.querySelector('.rs-setting-cont-4');
   if (!contentWrapper) return;
 
-  const root = getPageRoot(contentWrapper);
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return;
+  const target = displayText.trim().toLowerCase();
+  if (!target) return;
 
-  const candidates = root.querySelectorAll(
+  const candidates = contentWrapper.querySelectorAll(
     'h2, h3, span, label, [class*="text-textcolor"]',
   );
 
   for (const el of candidates) {
-    // Skip buttons (submenu tabs, action buttons)
     if ((el as Element).closest('button')) continue;
-    // Skip containers with many children
+    if ((el as Element).closest('.flex.rounded-md.border.border-darkborderc')) continue;
     if (el.children.length > 3) continue;
 
-    const text = el.textContent?.toLowerCase() || '';
-    if (tokens.some((t) => text.includes(t))) {
+    const text = el.textContent?.trim().toLowerCase() || '';
+    if (text === target) {
       el.classList.add(HIGHLIGHT_CLASS);
-      // Remove class after animation ends so it can re-trigger on next click
       el.addEventListener('animationend', () => {
         el.classList.remove(HIGHLIGHT_CLASS);
       }, { once: true });
+      break; // Pin-point: only the first exact match
     }
   }
 }
@@ -110,10 +108,7 @@ export function scrollToFirstHighlight(): void {
  * 3. Highlight matching text
  * 4. Scroll to first match
  */
-export async function navigateTo(
-  entry: IndexEntry,
-  query?: string,
-): Promise<void> {
+export async function navigateTo(entry: IndexEntry): Promise<void> {
   const sidebar = document.querySelector('.rs-setting-cont-3');
   if (!sidebar) return;
 
@@ -143,8 +138,8 @@ export async function navigateTo(
     }
   }
 
-  if (query) {
-    highlightMatches(query);
-    scrollToFirstHighlight();
-  }
+  // Extra wait for Svelte to finish rendering tab content
+  await wait(NAV_WAIT_MS);
+  highlightExact(entry.displayText);
+  scrollToFirstHighlight();
 }

@@ -1,6 +1,6 @@
 import type { IndexEntry } from './types';
 import { buildIndex } from './indexer';
-import { navigateTo, clearHighlights, highlightMatches } from './navigator';
+import { navigateTo, clearHighlights } from './navigator';
 
 let index: IndexEntry[] = [];
 let isIndexed = false;
@@ -27,12 +27,13 @@ function injectStyles() {
       border-radius: 4px;
       outline: 1px solid var(--risu-theme-borderc);
       outline-offset: 2px;
-      animation: ssb-pulse 1.8s ease-out forwards;
+      animation: ssb-pulse 3s ease-out forwards;
     }
 
     @keyframes ssb-pulse {
       0%   { background-color: var(--risu-theme-borderc); }
-      30%  { background-color: var(--risu-theme-selected); }
+      20%  { background-color: var(--risu-theme-selected); }
+      60%  { background-color: var(--risu-theme-selected); }
       100% { background-color: transparent; outline-color: transparent; }
     }
 
@@ -229,7 +230,7 @@ function updateSelection(idx: number) {
 }
 
 async function navigateAndHighlight(entry: IndexEntry) {
-  await navigateTo(entry, activeQuery);
+  await navigateTo(entry);
 }
 
 // ─── Indexing ───
@@ -453,7 +454,9 @@ export function createSearchUI(): HTMLElement {
 }
 
 export function destroySearchUI() {
-  clearHighlights();
+  // Don't clearHighlights here — highlights live in the content area,
+  // not the sidebar. On mobile the sidebar disappears while the user
+  // is viewing highlighted content. The pulse animation auto-clears.
   hideResults();
   root?.remove();
   root = null;
