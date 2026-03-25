@@ -277,7 +277,6 @@ async function forceReindex() {
 // ─── Core search flow ───
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-let navigateTimer: ReturnType<typeof setTimeout> | null = null;
 
 function applySearch(query: string) {
   activeQuery = query;
@@ -299,18 +298,8 @@ function applySearch(query: string) {
   console.log(`[ssb:ui] applySearch: ${results.length} results, ${groups.length} groups`);
   renderResults(groups);
 
-  // Auto-navigate to first result (desktop only).
-  // On mobile (<700px), sidebar and content are mutually exclusive —
-  // auto-navigating would immediately hide the search bar.
-  if (navigateTimer) clearTimeout(navigateTimer);
-  if (window.innerWidth >= 700) {
-    navigateTimer = setTimeout(() => {
-      if (flatItems.length > 0) {
-        updateSelection(0);
-        navigateAndHighlight(flatItems[0].entry);
-      }
-    }, 300);
-  } else if (flatItems.length > 0) {
+  // Select first result visually but do NOT auto-navigate.
+  if (flatItems.length > 0) {
     updateSelection(0);
   }
 }
