@@ -121,6 +121,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url === '/setting-searchbar/index' && req.method === 'GET') {
+    const data = {
+      entries: cachedResult?.entries ?? [],
+      cachedAt,
+      age: cachedAt ? Math.round((Date.now() - cachedAt) / 1000) : null,
+    };
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'access-control-allow-origin': '*',
+    });
+    res.end(JSON.stringify(data));
+    return;
+  }
+
   if (url === '/' && req.method === 'GET') {
     proxyRequest(req, res, (body) => {
       const html = body.toString('utf-8');
