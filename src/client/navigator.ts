@@ -1,9 +1,31 @@
 import type { IndexEntry } from './types';
 
 const NAV_WAIT_MS = 150;
+const CONTENT_APPEAR_POLL_MS = 50;
+const CONTENT_APPEAR_TIMEOUT_MS = 2000;
 
 function wait(ms: number): Promise<void> {
   return new Promise((r) => requestAnimationFrame(() => setTimeout(r, ms)));
+}
+
+/** Wait for `.rs-setting-cont-4` to appear in the DOM (for mobile navigation). */
+function waitForContent(): Promise<Element | null> {
+  const existing = document.querySelector('.rs-setting-cont-4');
+  if (existing) return Promise.resolve(existing);
+
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const id = setInterval(() => {
+      const el = document.querySelector('.rs-setting-cont-4');
+      if (el) {
+        clearInterval(id);
+        resolve(el);
+      } else if (Date.now() - start > CONTENT_APPEAR_TIMEOUT_MS) {
+        clearInterval(id);
+        resolve(null);
+      }
+    }, CONTENT_APPEAR_POLL_MS);
+  });
 }
 
 function getMenuButtons(sidebar: Element): HTMLButtonElement[] {
@@ -89,8 +111,7 @@ export async function navigateTo(
   query?: string,
 ): Promise<void> {
   const sidebar = document.querySelector('.rs-setting-cont-3');
-  const contentWrapper = document.querySelector('.rs-setting-cont-4');
-  if (!sidebar || !contentWrapper) return;
+  if (!sidebar) return;
 
   const menuButtons = getMenuButtons(sidebar);
   const btn = menuButtons[entry.menuButtonIdx];
@@ -98,8 +119,14 @@ export async function navigateTo(
 
   clearHighlights();
 
+  // Click the sidebar button first. On mobile (<700px), this sets
+  // SettingsMenuIndex which hides the sidebar and renders the content area.
   btn.click();
   await wait(NAV_WAIT_MS);
+
+  // Wait for content area — on mobile it appears after Svelte re-renders.
+  const contentWrapper = await waitForContent();
+  if (!contentWrapper) return;
 
   const pageRoot = getPageRoot(contentWrapper);
 
