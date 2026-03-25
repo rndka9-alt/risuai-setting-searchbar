@@ -339,9 +339,7 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
           if (!display || display.length < 2 || display.length > 120) return;
           if (seen.has(display)) return;
           seen.add(display);
-          const parent = el.parentElement;
-          const search = parent?.textContent?.trim() || display;
-          results.push({ display, search, accordionPath: getAccordionPath(el, root) });
+          results.push({ display, search: display, accordionPath: getAccordionPath(el, root) });
         });
 
       return results;
@@ -367,12 +365,44 @@ async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
 
     const entries: IndexEntry[] = [];
 
+    /** Get a fingerprint of the content area to detect changes. */
+    function contentFingerprint(): string {
+      const cw = document.querySelector('.rs-setting-cont-4');
+      if (!cw) return '';
+      const h2 = cw.querySelector('h2')?.textContent?.trim() || '';
+      const elCount = cw.querySelectorAll('*').length;
+      return `${h2}|${elCount}`;
+    }
+
+    /**
+     * Wait until content stabilizes (fingerprint unchanged for `stableMs`).
+     * Handles both tab switches (fingerprint must change from `prev`)
+     * and lazy/waterfall rendering (fingerprint must stop changing).
+     */
+    async function waitForStableContent(prevFingerprint: string, stableMs = 400, timeoutMs = 3000): Promise<void> {
+      const start = Date.now();
+      let lastFp = prevFingerprint;
+      let stableSince = 0;
+
+      while (Date.now() - start < timeoutMs) {
+        await wait(100);
+        const fp = contentFingerprint();
+        if (fp !== lastFp) {
+          lastFp = fp;
+          stableSince = Date.now();
+        } else if (stableSince > 0 && Date.now() - stableSince >= stableMs) {
+          return; // Content stabilized
+        }
+      }
+    }
+
     for (let mi = 0; mi < menuButtons.length; mi++) {
       const btn = menuButtons[mi];
       const menuLabel = btn.querySelector('span')?.textContent?.trim() || '';
 
+      const prevFp = contentFingerprint();
       btn.click();
-      await wait(renderWait);
+      await waitForStableContent(prevFp);
 
       // Check if settings is still alive
       if (!document.querySelector('.rs-setting-cont-3')) break;
