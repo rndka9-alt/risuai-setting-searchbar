@@ -1,0 +1,357 @@
+import { chromium, type Browser, type Page, type Route } from 'playwright';
+import { isAllowed } from './request-filter.js';
+
+const TAG = '[ssb:crawler]';
+const CRAWL_TIMEOUT_MS = 60_000;
+const RENDER_WAIT_MS = 200;
+
+interface IndexEntry {
+  displayText: string;
+  searchText: string;
+  menuButtonIdx: number;
+  menuLabel: string;
+  subIdx: number;
+  subLabel: string;
+  elementIdx: number;
+}
+
+// ─── Browser pool (reuse across crawls) ───
+
+let browserInstance: Browser | null = null;
+
+async function getBrowser(): Promise<Browser> {
+  if (browserInstance && browserInstance.isConnected()) {
+    return browserInstance;
+  }
+  console.log(`${TAG} launching headless Chromium`);
+  browserInstance = await chromium.launch({ headless: true });
+  return browserInstance;
+}
+
+// ─── Network interception (whitelist from request-filter.ts) ───
+
+interface RequestLog {
+  method: string;
+  url: string;
+  action: 'allowed' | 'blocked';
+  timestamp: number;
+}
+
+function setupRouteInterception(
+  page: Page,
+  risuAuth: string,
+  targetOrigin: string,
+  requestLog: RequestLog[],
+) {
+  return page.route('**/*', async (route: Route) => {
+    const req = route.request();
+    const method = req.method();
+    const url = req.url();
+
+    if (isAllowed(method, url, targetOrigin)) {
+      requestLog.push({ method, url, action: 'allowed', timestamp: Date.now() });
+
+      // Inject auth header for same-origin API requests
+      if (url.startsWith(targetOrigin) && url.includes('/api/')) {
+        const headers = { ...req.headers(), 'risu-auth': risuAuth };
+        await route.continue({ headers });
+      } else {
+        await route.continue();
+      }
+    } else {
+      requestLog.push({ method, url, action: 'blocked', timestamp: Date.now() });
+      console.debug(`${TAG} blocked: ${method} ${url.slice(0, 100)}`);
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true }),
+      });
+    }
+  });
+}
+
+// ─── Pre-interaction: dismiss dialogs, open sidebar ───
+
+async function dismissDialogsAndOpenSidebar(page: Page): Promise<void> {
+  // Dismiss any confirmation dialogs (e.g., plugin permission prompts)
+  // Keep dismissing until no more dialogs appear
+  for (let i = 0; i < 10; i++) {
+    // Look for YES/NO style confirm dialogs
+    const noBtn = await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        const text = btn.textContent?.trim().toUpperCase();
+        if (text === 'NO' || text === 'OK' || text === 'CANCEL') {
+          btn.click();
+          return true;
+        }
+      }
+      return false;
+    });
+    if (noBtn) {
+      console.log(`${TAG} dismissed a dialog`);
+      await page.waitForTimeout(500);
+    } else {
+      break;
+    }
+  }
+
+  // Open sidebar if collapsed — click the top-left arrow toggle
+  // First, click the page body to ensure focus
+  await page.click('body');
+  await page.waitForTimeout(200);
+
+  // Try the arrow button (top-left, typically first button with SVG)
+  const sidebarToggle = await page.evaluate(() => {
+    // Look for a small button that contains an arrow SVG
+    const buttons = document.querySelectorAll('button');
+    for (const btn of buttons) {
+      const rect = btn.getBoundingClientRect();
+      // Top-left corner, small button
+      if (rect.left < 60 && rect.top < 60 && rect.width < 50) {
+        btn.click();
+        return `clicked: ${rect.left},${rect.top} ${rect.width}x${rect.height}`;
+      }
+    }
+    return null;
+  });
+  if (sidebarToggle) {
+    console.log(`${TAG} sidebar toggle: ${sidebarToggle}`);
+    await page.waitForTimeout(1000);
+  }
+}
+
+// ─── Settings page interaction ───
+
+async function openSettings(page: Page): Promise<boolean> {
+  // First, clear any blocking dialogs and ensure sidebar is visible
+  await dismissDialogsAndOpenSidebar(page);
+
+  // Diagnostic: screenshot after dialog dismissal
+  const buttonCount = await page.evaluate(() => document.querySelectorAll('button').length);
+  const bodySnippet = await page.evaluate(() => document.body?.innerText?.slice(0, 300) || '(empty)');
+  console.log(`${TAG} after dialog dismissal: buttons=${buttonCount}`);
+  console.log(`${TAG} body: ${bodySnippet.slice(0, 200)}`);
+  try {
+    await page.screenshot({ path: '/tmp/ssb-crawl-debug.png', fullPage: true });
+    console.log(`${TAG} screenshot saved`);
+  } catch {}
+
+  // Use Ctrl+S keyboard shortcut (RisuAI default hotkey for settings)
+  await page.keyboard.press('Control+s');
+  try {
+    await page.waitForSelector('.rs-setting-cont-3', { timeout: 5000 });
+    console.log(`${TAG} settings opened via Ctrl+,`);
+    return true;
+  } catch {
+    // Fallback: find button by text
+    console.log(`${TAG} Ctrl+S didn't work, trying button click`);
+    const buttons = await page.$$('button');
+    for (const btn of buttons) {
+      const text = await btn.textContent();
+      const lower = (text || '').toLowerCase();
+      if (lower.includes('setting') || lower.includes('설정') || lower.includes('設定')) {
+        await btn.click();
+        try {
+          await page.waitForSelector('.rs-setting-cont-3', { timeout: 5000 });
+          console.log(`${TAG} settings opened via button click`);
+          return true;
+        } catch {
+          continue;
+        }
+      }
+    }
+    console.warn(`${TAG} could not open settings`);
+    return false;
+  }
+}
+
+// ─── DOM crawling (runs inside the browser page) ───
+
+async function crawlAllTabs(page: Page): Promise<IndexEntry[]> {
+  // Run the crawl logic inside the browser context
+  return page.evaluate(async (renderWait: number) => {
+    function wait(ms: number): Promise<void> {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    function getMenuButtons(sidebar: Element): HTMLButtonElement[] {
+      const all = sidebar.querySelectorAll<HTMLButtonElement>('button');
+      return [...all].filter((b) => {
+        const span = b.querySelector('span');
+        return span && span.textContent?.trim();
+      });
+    }
+
+    function getSubmenuButtons(root: Element): HTMLButtonElement[] {
+      const container = root.querySelector(
+        '.flex.rounded-md.border.border-darkborderc',
+      );
+      if (!container) return [];
+      return [...container.querySelectorAll<HTMLButtonElement>('button')];
+    }
+
+    function collectLabels(root: Element): { display: string; search: string }[] {
+      const results: { display: string; search: string }[] = [];
+      const seen = new Set<string>();
+
+      root.querySelectorAll('h2, h3').forEach((h) => {
+        const text = h.textContent?.trim();
+        if (text && text.length >= 2 && !seen.has(text)) {
+          seen.add(text);
+          results.push({ display: text, search: text });
+        }
+      });
+
+      root
+        .querySelectorAll('span.text-textcolor, label, [class*="text-textcolor"]')
+        .forEach((el) => {
+          if (el.closest('button')) return;
+          if (el.closest('.flex.rounded-md.border.border-darkborderc')) return;
+          const display = el.textContent?.trim();
+          if (!display || display.length < 2 || display.length > 120) return;
+          if (seen.has(display)) return;
+          seen.add(display);
+          const parent = el.parentElement;
+          const search = parent?.textContent?.trim() || display;
+          results.push({ display, search });
+        });
+
+      return results;
+    }
+
+    // ─── Main crawl loop ───
+
+    const sidebar = document.querySelector('.rs-setting-cont-3');
+    if (!sidebar) return [];
+
+    const menuButtons = getMenuButtons(sidebar);
+    if (menuButtons.length === 0) return [];
+
+    // Click first button to ensure content area exists
+    menuButtons[0].click();
+    await wait(renderWait);
+
+    let contentWrapper = document.querySelector('.rs-setting-cont-4');
+    if (!contentWrapper) return [];
+
+    const entries: IndexEntry[] = [];
+
+    for (let mi = 0; mi < menuButtons.length; mi++) {
+      const btn = menuButtons[mi];
+      const menuLabel = btn.querySelector('span')?.textContent?.trim() || '';
+
+      btn.click();
+      await wait(renderWait);
+
+      // Check if settings is still alive
+      if (!document.querySelector('.rs-setting-cont-3')) break;
+
+      contentWrapper = document.querySelector('.rs-setting-cont-4');
+      if (!contentWrapper) continue;
+
+      const subButtons = getSubmenuButtons(contentWrapper);
+
+      if (subButtons.length > 0) {
+        for (let si = 0; si < subButtons.length; si++) {
+          subButtons[si].click();
+          await wait(renderWait);
+
+          contentWrapper = document.querySelector('.rs-setting-cont-4');
+          if (!contentWrapper) break;
+
+          const subLabel = subButtons[si].textContent?.trim() || '';
+          for (const l of collectLabels(contentWrapper)) {
+            entries.push({
+              displayText: l.display,
+              searchText: l.search,
+              menuButtonIdx: mi,
+              menuLabel,
+              subIdx: si,
+              subLabel,
+              elementIdx: 0,
+            });
+          }
+        }
+      } else {
+        for (const l of collectLabels(contentWrapper)) {
+          entries.push({
+            displayText: l.display,
+            searchText: l.search,
+            menuButtonIdx: mi,
+            menuLabel,
+            subIdx: -1,
+            subLabel: '',
+            elementIdx: 0,
+          });
+        }
+      }
+    }
+
+    return entries;
+  }, RENDER_WAIT_MS);
+}
+
+// ─── Public API ───
+
+export interface CrawlResult {
+  entries: IndexEntry[];
+  requestLog: RequestLog[];
+}
+
+export async function crawlSettingsIndex(
+  crawlerTarget: URL,
+  risuAuth: string,
+): Promise<CrawlResult> {
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    viewport: { width: 1024, height: 768 },
+  });
+  const page = await context.newPage();
+  const requestLog: RequestLog[] = [];
+
+  // Set a hard timeout for the entire operation
+  const timeoutId = setTimeout(() => {
+    console.warn(`${TAG} crawl timed out after ${CRAWL_TIMEOUT_MS}ms`);
+    context.close().catch(() => {});
+  }, CRAWL_TIMEOUT_MS);
+
+  try {
+    const targetOrigin = crawlerTarget.origin;
+    await setupRouteInterception(page, risuAuth, targetOrigin, requestLog);
+
+    console.log(`${TAG} navigating to ${crawlerTarget.href}`);
+    await page.goto(crawlerTarget.href, {
+      waitUntil: 'networkidle',
+      timeout: 30_000,
+    });
+
+    // Wait for app to finish loading
+    console.log(`${TAG} waiting for app initialization`);
+    await page.waitForSelector('#preloading', { state: 'hidden', timeout: 30_000 }).catch(() => {
+      console.warn(`${TAG} preloading indicator didn't disappear, continuing anyway`);
+    });
+    await page.waitForTimeout(3000);
+
+    // Open settings (handles dialogs + sidebar internally)
+    const opened = await openSettings(page);
+    if (!opened) {
+      console.warn(`${TAG} could not open settings, returning empty index`);
+      return { entries: [], requestLog };
+    }
+
+    // Crawl all tabs
+    console.log(`${TAG} crawling settings tabs`);
+    const entries = await crawlAllTabs(page);
+
+    // Log summary
+    const allowed = requestLog.filter((r) => r.action === 'allowed').length;
+    const blocked = requestLog.filter((r) => r.action === 'blocked').length;
+    console.log(`${TAG} crawl complete: ${entries.length} entries, ${allowed} requests allowed, ${blocked} blocked`);
+
+    return { entries, requestLog };
+  } finally {
+    clearTimeout(timeoutId);
+    await context.close();
+  }
+}

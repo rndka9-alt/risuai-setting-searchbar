@@ -8,6 +8,11 @@
  */
 
 import { createSearchUI, destroySearchUI } from './ui';
+import { installAuthCapture } from './auth-capture';
+
+// Capture risu-auth tokens from outgoing fetch requests.
+// Must run before any RisuAI code so we intercept the first API calls.
+installAuthCapture();
 
 const SIDEBAR_SELECTOR = '.rs-setting-cont-3';
 const TAG = '[setting-searchbar]';

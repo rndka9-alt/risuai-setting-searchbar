@@ -16,4 +16,5 @@ esbuild.buildSync({
   outfile: 'dist/server.js',
   target: 'node18',
   sourcemap: true,
+  external: ['playwright'],
 });

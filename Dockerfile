@@ -1,9 +1,9 @@
-FROM node:20-alpine
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 COPY dist/ dist/
 

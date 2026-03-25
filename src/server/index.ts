@@ -1,8 +1,9 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PORT, UPSTREAM, LOG_LEVEL } from './config.js';
+import { PORT, UPSTREAM, CRAWLER_TARGET, LOG_LEVEL } from './config.js';
 import { injectScriptTag } from './inject-script-tag.js';
+import { crawlSettingsIndex } from './crawler.js';
 
 const clientJs = fs.readFileSync(
   path.join(import.meta.dirname, 'client.js'),
@@ -55,8 +56,40 @@ function proxyRequest(
   req.pipe(proxyReq);
 }
 
+let crawlInProgress = false;
+
 const server = http.createServer((req, res) => {
   const url = req.url || '';
+
+  if (url === '/setting-searchbar/build-index' && req.method === 'POST') {
+    const risuAuth = req.headers['risu-auth'];
+    if (!risuAuth || typeof risuAuth !== 'string') {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing risu-auth header' }));
+      return;
+    }
+    if (crawlInProgress) {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Crawl already in progress' }));
+      return;
+    }
+    crawlInProgress = true;
+    crawlSettingsIndex(CRAWLER_TARGET, risuAuth)
+      .then((result) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(result));
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        log('error', `crawl failed: ${msg}`);
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Crawl failed', detail: msg }));
+      })
+      .finally(() => {
+        crawlInProgress = false;
+      });
+    return;
+  }
 
   if (url === '/setting-searchbar/client.js' && req.method === 'GET') {
     res.writeHead(200, {
